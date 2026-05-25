@@ -156,6 +156,14 @@ def handle_message(event):
         # 第二步：把使用者的輸入當作時間
         topic = temp_data.get('topic', '行程')
         time_str = text.strip()
+        
+        # 檢查使用者有沒有給「日期」 (例如：明天, 星期三, 5號)
+        date_keywords = ["一", "二", "三", "四", "五", "六", "日", "天", "號", "明", "後", "星期", "禮拜", "今"]
+        if not any(k in time_str for k in date_keywords):
+            reply_msg = f"您只有說「{time_str}」，請問是【哪一天】的 {time_str} 呢？\n(例如：明天、星期三、15號)"
+            line_bot_api.reply_message(reply_token, TextSendMessage(text=reply_msg))
+            return
+            
         temp_data['time'] = time_str
         set_user_state(user_id, 'WAITING_FOR_LOCATION', temp_data=json.dumps(temp_data, ensure_ascii=False))
         reply_msg = f"收到！時間訂在「{time_str}」。\n最後，請問地點在哪裡呢？\n(只要告訴我地點名稱即可，任何地點都可以喔！)"
