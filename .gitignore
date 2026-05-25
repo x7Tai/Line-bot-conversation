@@ -1,0 +1,17 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+venv/
+env/
+
+# Environment Variables
+.env
+
+# Database
+bot.db
+*.sqlite3
+
+# Google API Credentials
+credentials.json
+token.json
