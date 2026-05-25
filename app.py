@@ -71,12 +71,14 @@ def send_reminder(user_id, topic, meeting_time, location):
 def process_meeting_booking(user_id, topic, meeting_time_str, location, reply_token):
     """處理完整的訂房/開會/約會邏輯"""
     try:
-        # 嘗試解析時間 (使用 meeting_time_str 來解析)
-        parsed_time = dateparser.parse(meeting_time_str, languages=['zh-Hant', 'zh'])
-        
-        if not parsed_time:
-            # 如果解析不到，先給個預設時間，為了 Demo 方便
-            parsed_time = datetime.now() + timedelta(days=1)
+        # 嘗試解析 Gemini 產生的標準時間格式
+        try:
+            parsed_time = datetime.strptime(meeting_time_str, "%Y-%m-%d %H:%M")
+        except ValueError:
+            # 如果 Gemini 沒有回傳標準格式，退回使用 dateparser
+            parsed_time = dateparser.parse(meeting_time_str, languages=['zh-Hant', 'zh'])
+            if not parsed_time:
+                parsed_time = datetime.now() + timedelta(days=1)
             
         # 儲存到資料庫
         save_meeting(user_id, topic, meeting_time_str, location)
@@ -91,11 +93,6 @@ def process_meeting_booking(user_id, topic, meeting_time_str, location, reply_to
         # 加入排程 (正式 2 小時前)
         if reminder_time > datetime.now():
             scheduler.add_job(send_reminder, 'date', run_date=reminder_time, args=[user_id, topic, meeting_time_str, location])
-            
-        # [作業展示專用] 為了讓教授跟助教能立刻看到 2 小時前的 Email 與 LINE 提醒效果，
-        # 我們額外加上一個「10秒後馬上發送」的測試排程。
-        demo_time = datetime.now() + timedelta(seconds=10)
-        scheduler.add_job(send_reminder, 'date', run_date=demo_time, args=[user_id, f"{topic} (展示用測試提醒)", meeting_time_str, location])
         
         # 自動建立 Google 行事曆 (並設定 2 小時前提醒)
         calendar_msg = ""
@@ -162,10 +159,11 @@ def handle_message(event):
         temp_data = {"topic": None, "time": None, "location": None}
 
     # 組合 Prompt 給 Gemini
+    today_date = datetime.now().strftime("%Y-%m-%d")
     system_prompt = f"""
     你是一個行事曆秘書。你的任務是從使用者的輸入中擷取會議或行程的三個要素：
     1. topic (行程主題，例如開會、約會、吃飯、洗牙、踢足球)
-    2. time (時間，必須包含日期概念，例如「明天下午3點」、「星期三早上9點」。如果使用者只說幾點(例如「下午5點」)，請當作未知，設定為 null)
+    2. time (時間，必須轉換為標準格式「YYYY-MM-DD HH:MM」。今天是 {today_date}。如果使用者說「明天下午3點」，請計算出實際日期。如果使用者只說幾點(例如「下午5點」)，請當作未知，設定為 null)
     3. location (地點，例如麥當勞、會議室、海大籃球場)
     
     目前已經收集到的資訊 (若為null代表尚未提供)：
