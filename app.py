@@ -91,6 +91,11 @@ def process_meeting_booking(user_id, topic, meeting_time_str, location, reply_to
         # 加入排程 (正式 2 小時前)
         if reminder_time > datetime.now():
             scheduler.add_job(send_reminder, 'date', run_date=reminder_time, args=[user_id, topic, meeting_time_str, location])
+            
+        # [作業展示專用] 為了讓教授跟助教能立刻看到 2 小時前的 Email 與 LINE 提醒效果，
+        # 我們額外加上一個「10秒後馬上發送」的測試排程。
+        demo_time = datetime.now() + timedelta(seconds=10)
+        scheduler.add_job(send_reminder, 'date', run_date=demo_time, args=[user_id, f"{topic} (展示用測試提醒)", meeting_time_str, location])
         
         # 自動建立 Google 行事曆 (並設定 2 小時前提醒)
         calendar_msg = ""
