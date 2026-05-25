@@ -178,7 +178,19 @@ def handle_message(event):
 
     try:
         response = gemini_model.generate_content(system_prompt)
-        parsed_data = json.loads(response.text)
+        raw_text = response.text.strip()
+        
+        # 強化 JSON 解析 (移除 markdown 與多餘的逗號)
+        import re
+        clean_text = re.sub(r'^```(?:json)?|```$', '', raw_text, flags=re.MULTILINE).strip()
+        clean_text = re.sub(r',\s*}', '}', clean_text)
+        clean_text = re.sub(r',\s*\]', ']', clean_text)
+        
+        try:
+            parsed_data = json.loads(clean_text)
+        except json.JSONDecodeError as e:
+            print(f"JSON 解析失敗. 原始字串: {raw_text}")
+            raise e
         
         # 把解析到的資料存回 temp_data
         if parsed_data.get('topic'): temp_data['topic'] = parsed_data['topic']
