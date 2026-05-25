@@ -125,93 +125,52 @@ def handle_message(event):
         
     if text in ["取消", "重來", "清除"]:
         clear_user_state(user_id)
-        line_bot_api.reply_message(reply_token, TextSendMessage(text="好的，已為您清除剛剛的對話記憶，我們可以重新開始囉！"))
+        line_bot_api.reply_message(reply_token, TextSendMessage(text="好的，已為您清除剛剛的對話記憶，我們可以重新開始囉！\n請問您要安排什麼行程呢？"))
         return
         
     state_record = get_user_state(user_id)
     current_state = state_record['state'] if state_record else None
-    temp_data = state_record['temp_data'] if state_record else ""
     
-    # 支援多種情境
-    event_keywords = ["開會", "約會", "吃飯", "聚餐", "上課", "打球", "討論", "看電影", "行程", "安排", "預約", "見面", "健身", "運動"]
-    
-    # 如果不在等待狀態，且沒提到任何行程，直接回覆預設訊息
-    if current_state != 'WAITING_FOR_DETAILS' and not any(k in text for k in event_keywords):
-        line_bot_api.reply_message(
-            reply_token,
-            TextSendMessage(text="如果您要安排任何行程（開會、約會、聚餐、健身等），可以告訴我時間和地點喔！例如：「這週一下午4點 延平技術大樓817開會」")
-        )
+    import json
+    try:
+        temp_data = json.loads(state_record['temp_data']) if state_record and state_record['temp_data'] else {}
+    except:
+        temp_data = {}
+
+    if current_state is None:
+        # 過濾打招呼
+        greetings = ["你好", "安安", "哈囉", "hello", "hi", "新增", "行程", "預約", "安排", "建立行程"]
+        if text.lower().strip() in greetings or len(text) < 2:
+            reply_msg = "您好！我是您的專屬行事曆秘書 📅\n請問這次要幫您安排什麼行程呢？\n(請直接告訴我名稱，例如：「讀書會」、「剪頭髮」、「去海邊玩」)"
+            line_bot_api.reply_message(reply_token, TextSendMessage(text=reply_msg))
+            return
+            
+        # 第一步：把使用者的輸入當作主題
+        topic = text.strip()
+        set_user_state(user_id, 'WAITING_FOR_TIME', temp_data=json.dumps({"topic": topic}, ensure_ascii=False))
+        reply_msg = f"好的，幫您安排「{topic}」！\n請問時間是哪一天幾點呢？\n(例如：星期三下午2點30分)"
+        line_bot_api.reply_message(reply_token, TextSendMessage(text=reply_msg))
         return
 
-    # 結合歷史輸入與本次輸入
-    if current_state == 'WAITING_FOR_DETAILS':
-        combined_text = f"{temp_data} {text}"
-    else:
-        combined_text = text
+    elif current_state == 'WAITING_FOR_TIME':
+        # 第二步：把使用者的輸入當作時間
+        topic = temp_data.get('topic', '行程')
+        time_str = text.strip()
+        temp_data['time'] = time_str
+        set_user_state(user_id, 'WAITING_FOR_LOCATION', temp_data=json.dumps(temp_data, ensure_ascii=False))
+        reply_msg = f"收到！時間訂在「{time_str}」。\n最後，請問地點在哪裡呢？\n(只要告訴我地點名稱即可，任何地點都可以喔！)"
+        line_bot_api.reply_message(reply_token, TextSendMessage(text=reply_msg))
+        return
+
+    elif current_state == 'WAITING_FOR_LOCATION':
+        # 第三步：把使用者的輸入當作地點，並建立行程
+        topic = temp_data.get('topic', '行程')
+        meeting_time_str = temp_data.get('time', '')
+        location = text.strip()
         
-    # 擷取主題
-    topic = "行程"
-    for k in ["開會", "約會", "吃飯", "聚餐", "上課", "打球", "討論", "看電影", "見面", "健身", "運動"]:
-        if k in combined_text:
-            topic = k
-            break
-
-    # 定義關鍵字
-    loc_keywords = ["樓", "地點", "教室", "817", "會議室", "餐廳", "餐", "館", "公園", "路", "街", "店", "家", "大學", "學校", "海大", "公司", "辦公室", "中心", "大樓", "咖啡", "圖書館", "房", "廠", "健身房"]
-    date_keywords = ["一", "二", "三", "四", "五", "六", "日", "天", "號", "明", "後"]
-    time_keywords = ["點", "分", "早上", "下午", "晚上", "點半"]
-
-    # 檢查是否具備所有條件
-    has_date = any(keyword in combined_text for keyword in date_keywords)
-    has_time = any(keyword in combined_text for keyword in time_keywords)
-    has_location = any(keyword in combined_text for keyword in loc_keywords)
-
-    if has_date and has_time and has_location:
-        # 資訊齊全！我們從 combined_text 中「萃取」出時間與地點
-        extracted_location = ""
-        time_chunks = []
-        
-        chunks = combined_text.split()
-        if len(chunks) == 1:
-            extracted_location = combined_text
-            meeting_time_str = combined_text
-        else:
-            for chunk in chunks:
-                if any(k in chunk for k in loc_keywords):
-                    extracted_location = chunk
-                elif any(k in chunk for k in date_keywords + time_keywords + ["星期", "禮拜"]):
-                    time_chunks.append(chunk)
-            
-            if not extracted_location:
-                extracted_location = "未指定地點"
-            
-            meeting_time_str = " ".join(time_chunks) if time_chunks else "未指定時間"
-
-        process_meeting_booking(user_id, topic, meeting_time_str, extracted_location, reply_token)
-
-    else:
-        # 資訊依然不齊全，更新歷史紀錄並繼續詢問
-        set_user_state(user_id, 'WAITING_FOR_DETAILS', temp_data=combined_text)
-        
-        if not has_date and not has_time and not has_location:
-            reply_text = f"請問這個{topic}具體是哪一天、幾點幾分，以及地點在哪裡呢？"
-        else:
-            got = []
-            if has_date: got.append("日期")
-            if has_time: got.append("時間")
-            if has_location: got.append("地點")
-            
-            missing = []
-            if not has_date: missing.append("哪一天（例如星期幾）")
-            if not has_time: missing.append("幾點幾分")
-            if not has_location: missing.append("在哪個地點")
-            
-            reply_text = f"收到{'與'.join(got)}了！但請問這個{topic}具體是{'、'.join(missing)}呢？"
-            
-        line_bot_api.reply_message(
-            reply_token, 
-            TextSendMessage(text=reply_text)
-        )
+        # 建立行程 (process_meeting_booking 內部會處理完畢並 clear_user_state)
+        process_meeting_booking(user_id, topic, meeting_time_str, location, reply_token)
+        return
 
 if __name__ == "__main__":
     init_db()
