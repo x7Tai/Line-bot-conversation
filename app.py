@@ -9,6 +9,11 @@ from linebot.models import MessageEvent, TextMessage, TextSendMessage
 from apscheduler.schedulers.background import BackgroundScheduler
 import dateparser
 import google.generativeai as genai
+import warnings
+from linebot.deprecations import LineBotSdkDeprecatedIn30
+
+# 忽略 LINE SDK 舊版的警告，讓終端機畫面保持乾淨
+warnings.filterwarnings("ignore", category=LineBotSdkDeprecatedIn30)
 
 from db import init_db, set_user_state, get_user_state, clear_user_state, save_meeting
 from utils import send_email_notification, generate_google_calendar_url
@@ -27,7 +32,7 @@ generation_config = {
   "response_mime_type": "application/json",
 }
 gemini_model = genai.GenerativeModel(
-  model_name="gemini-2.5-flash",
+  model_name="gemini-3.5-flash",
   generation_config=generation_config,
 )
 
