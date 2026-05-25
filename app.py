@@ -1,5 +1,6 @@
 import os
 import re
+import json
 from datetime import datetime, timedelta
 from flask import Flask, request, abort
 from linebot import LineBotApi, WebhookHandler
@@ -7,6 +8,7 @@ from linebot.exceptions import InvalidSignatureError
 from linebot.models import MessageEvent, TextMessage, TextSendMessage
 from apscheduler.schedulers.background import BackgroundScheduler
 import dateparser
+import google.generativeai as genai
 
 from db import init_db, set_user_state, get_user_state, clear_user_state, save_meeting
 from utils import send_email_notification, generate_google_calendar_url
@@ -14,6 +16,20 @@ from calendar_api import create_calendar_event
 from dotenv import load_dotenv
 
 load_dotenv()
+
+# 初始化 Gemini
+genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
+generation_config = {
+  "temperature": 0.1,
+  "top_p": 0.95,
+  "top_k": 64,
+  "max_output_tokens": 1024,
+  "response_mime_type": "application/json",
+}
+gemini_model = genai.GenerativeModel(
+  model_name="gemini-1.5-flash",
+  generation_config=generation_config,
+)
 
 app = Flask(__name__)
 
@@ -125,59 +141,65 @@ def handle_message(event):
         
     if text in ["取消", "重來", "清除"]:
         clear_user_state(user_id)
-        line_bot_api.reply_message(reply_token, TextSendMessage(text="好的，已為您清除剛剛的對話記憶，我們可以重新開始囉！\n請問您要安排什麼行程呢？"))
+        line_bot_api.reply_message(reply_token, TextSendMessage(text="好的，已為您清除剛剛的對話記憶，我們可以重新開始囉！請問您要安排什麼行程呢？"))
         return
         
     state_record = get_user_state(user_id)
-    current_state = state_record['state'] if state_record else None
     
-    import json
     try:
-        temp_data = json.loads(state_record['temp_data']) if state_record and state_record['temp_data'] else {}
+        temp_data = json.loads(state_record['temp_data']) if state_record and state_record['temp_data'] else {"topic": None, "time": None, "location": None}
     except:
-        temp_data = {}
+        temp_data = {"topic": None, "time": None, "location": None}
 
-    if current_state is None:
-        # 過濾打招呼
-        greetings = ["你好", "安安", "哈囉", "hello", "hi", "新增", "行程", "預約", "安排", "建立行程"]
-        if text.lower().strip() in greetings or len(text) < 2:
-            reply_msg = "您好！我是您的專屬行事曆秘書 📅\n請問這次要幫您安排什麼行程呢？\n(請直接告訴我名稱，例如：「讀書會」、「剪頭髮」、「去海邊玩」)"
+    # 組合 Prompt 給 Gemini
+    system_prompt = f"""
+    你是一個行事曆秘書。你的任務是從使用者的輸入中擷取會議或行程的三個要素：
+    1. topic (行程主題，例如開會、約會、吃飯、洗牙、踢足球)
+    2. time (時間，必須包含日期概念，例如「明天下午3點」、「星期三早上9點」。如果使用者只說幾點(例如「下午5點」)，請當作未知，設定為 null)
+    3. location (地點，例如麥當勞、會議室、海大籃球場)
+    
+    目前已經收集到的資訊 (若為null代表尚未提供)：
+    {json.dumps(temp_data, ensure_ascii=False)}
+    
+    使用者的最新輸入是：「{text}」
+    
+    請結合已經收集到的資訊與最新輸入，更新並回傳最新的 JSON。
+    如果無法確定某個要素，請保持 null。
+    必須只回傳符合格式的 JSON 字串，不要有其他廢話。
+    """
+
+    try:
+        response = gemini_model.generate_content(system_prompt)
+        parsed_data = json.loads(response.text)
+        
+        # 把解析到的資料存回 temp_data
+        if parsed_data.get('topic'): temp_data['topic'] = parsed_data['topic']
+        if parsed_data.get('time'): temp_data['time'] = parsed_data['time']
+        if parsed_data.get('location'): temp_data['location'] = parsed_data['location']
+        
+        # 檢查是否齊全
+        missing = []
+        if not temp_data.get('topic'): missing.append("行程主題")
+        if not temp_data.get('time'): missing.append("時間 (請記得說哪一天喔！)")
+        if not temp_data.get('location'): missing.append("地點")
+        
+        if missing:
+            set_user_state(user_id, 'WAITING_FOR_DETAILS', temp_data=json.dumps(temp_data, ensure_ascii=False))
+            reply_msg = f"我已經記下目前的資訊！\n"
+            if temp_data.get('topic'): reply_msg += f"✅ 主題：{temp_data['topic']}\n"
+            if temp_data.get('time'): reply_msg += f"✅ 時間：{temp_data['time']}\n"
+            if temp_data.get('location'): reply_msg += f"✅ 地點：{temp_data['location']}\n"
+            reply_msg += f"\n👉 請問您的「{'、'.join(missing)}」是？"
+            
             line_bot_api.reply_message(reply_token, TextSendMessage(text=reply_msg))
             return
+        else:
+            # 全部都有了！
+            process_meeting_booking(user_id, temp_data['topic'], temp_data['time'], temp_data['location'], reply_token)
             
-        # 第一步：把使用者的輸入當作主題
-        topic = text.strip()
-        set_user_state(user_id, 'WAITING_FOR_TIME', temp_data=json.dumps({"topic": topic}, ensure_ascii=False))
-        reply_msg = f"好的，幫您安排「{topic}」！\n請問時間是哪一天幾點呢？\n(例如：星期三下午2點30分)"
-        line_bot_api.reply_message(reply_token, TextSendMessage(text=reply_msg))
-        return
-
-    elif current_state == 'WAITING_FOR_TIME':
-        # 第二步：把使用者的輸入當作時間
-        topic = temp_data.get('topic', '行程')
-        time_str = text.strip()
-        
-        # 檢查使用者有沒有給「日期」 (例如：明天, 星期三, 5號)
-        date_keywords = ["一", "二", "三", "四", "五", "六", "日", "天", "號", "明", "後", "星期", "禮拜", "今"]
-        if not any(k in time_str for k in date_keywords):
-            reply_msg = f"您只有說「{time_str}」，請問是【哪一天】的 {time_str} 呢？\n(例如：明天、星期三、15號)"
-            line_bot_api.reply_message(reply_token, TextSendMessage(text=reply_msg))
-            return
-            
-        temp_data['time'] = time_str
-        set_user_state(user_id, 'WAITING_FOR_LOCATION', temp_data=json.dumps(temp_data, ensure_ascii=False))
-        reply_msg = f"收到！時間訂在「{time_str}」。\n最後，請問地點在哪裡呢？\n(只要告訴我地點名稱即可，任何地點都可以喔！)"
-        line_bot_api.reply_message(reply_token, TextSendMessage(text=reply_msg))
-        return
-
-    elif current_state == 'WAITING_FOR_LOCATION':
-        # 第三步：把使用者的輸入當作地點，並建立行程
-        topic = temp_data.get('topic', '行程')
-        meeting_time_str = temp_data.get('time', '')
-        location = text.strip()
-        
-        # 建立行程 (process_meeting_booking 內部會處理完畢並 clear_user_state)
-        process_meeting_booking(user_id, topic, meeting_time_str, location, reply_token)
+    except Exception as e:
+        print(f"Gemini API 錯誤: {e}")
+        line_bot_api.reply_message(reply_token, TextSendMessage(text="抱歉，我的大腦剛才有點當機，請再試一次好嗎？"))
         return
 
 if __name__ == "__main__":
